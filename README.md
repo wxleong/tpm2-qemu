@@ -7,152 +7,98 @@ Access hardware TPM from QEMU.
 - **[Prerequisites](#prerequisites)**
 - **[Hardware Setup](#hardware-setup)**
 - **[Software Setup](#software-setup)**
-- **[Launch](#launch)**
+- **[Launch QEMU](#launch-qemu)**
 
 # Prerequisites
 
-<!--
-- Raspberry Pi 4 Model B [[1]](#1)
--->
 - Host machine with Ubuntu 20.04.2 LTS installed
-- Iridium 9670 TPM 2.0 board [[2]](#2)
+- Iridium 9670 TPM 2.0 board and USB-FTDI-SPI converter [[1]](#1)
 
 # Hardware Setup
 
+Complete the setup [[1]](#1)
+
 # Software Setup
 
-Install QEMU:
+Install dependencies:
 ```
 $ sudo apt update
-$ sudo apt-get install qemu-system
+$ sudo apt-get install qemu-system ovmf libguestfs-tools libfuse-dev
 ```
 
-Optionally, install QEMU from source (modified from [[3]](#3) v7.0.0):
+Download Debian installer ISO:
 ```
-$ sudo apt-get install git libglib2.0-dev libfdt-dev libpixman-1-dev zlib1g-dev ninja-build make gcc
-$ git clone https://github.com/wxleong/qemu.git ~/qemu
-$ cd ~/qemu
-$ git checkout develop-usb-tpm
-$ mkdir build
-$ cd build
-$ ../configure
-$ make -j$(nproc)
+$ curl https://cdimage.debian.org/cdimage/release/current/amd64/iso-cd/debian-11.3.0-amd64-netinst.iso --output ~/debian-11.3.0-amd64-netinst.iso
 ```
 
-Download kernel binary and dtb:
+Create a Debian base image by completing the Debian OS installation through a remote desktop viewer (you may use Vinagre from Ubuntu Software):
 ```
-$ git clone https://github.com/dhruvvyas90/qemu-rpi-kernel ~/qemu-rpi-kernel
-$ cd ~/qemu-rpi-kernel
-$ git checkout 1938fb5ac06188c12fc88b266cf6912e3fea6f68
-```
-
-Download RPi OS image:
-```
-$ sudo apt install curl
-$ curl https://downloads.raspberrypi.org/raspios_armhf/images/raspios_armhf-2022-04-07/2022-04-04-raspios-bullseye-armhf.img.xz --output ~/2022-04-04-raspios-bullseye-armhf.img.xz
-$ cd ~
-$ unxz 2022-04-04-raspios-bullseye-armhf.img.xz
+$ ~/qemu/build/qemu-img create -f qcow2 ~/debian-x86_64.qcow 10G
+$ ~/qemu/build/qemu-system-x86_64 \
+  -m 4096 \
+  -hda ~/debian-x86_64.qcow \
+  -cdrom ~/Downloads/debian-11.3.0-amd64-netinst.iso \
+  -boot d \
+  -smp $(nproc)
 ```
 
-Restore the default 'pi' user:
+Extract the kernel and initrd from the base image:
 ```
-$ cd ~
-$ sudo modprobe loop
-$ LOOP=`sudo losetup -f`
-$ sudo losetup -P $LOOP 2022-04-04-raspios-bullseye-armhf.img
-$ sudo mount ${LOOP}p2 /mnt/
-
-$ sudo su -c "echo 'pi:x:1000:1000:,,,:/home/pi:/bin/bash' >> /mnt/etc/passwd"
-$ sudo su -c "echo 'pi:\$y\$j9T\$esBSS1gyTG7u.pAPq6nvJ1\$xj6oJZIPpaaVcT0F1WF7tWdqcrE4sULZwmyWQPtSbt0:19158:0:99999:7:::' >> /mnt/etc/shadow"
-
-# Remove duplicated entries "pi..."
-$ sudo vi /mnt/etc/passwd
-$ sudo vi /mnt/etc/shadow
-
-$ sudo umount ${LOOP}p2
-$ sudo losetup -d ${LOOP}
+$ sudo chmod 644 /boot/vmlinuz*
+$ virt-ls -a ~/debian-x86_64.qcow /boot/
+$ virt-copy-out -a ~/debian-x86_64.qcow /boot/vmlinuz-5.10.0-15-amd64 /boot/initrd.img-5.10.0-15-amd64 ~/
 ```
 
-# Launch
-
-Directly via QEMU command:
+Start a character device in user space:
 ```
-$ ~/qemu/build/qemu-system-arm \
-  -M versatilepb \
-  -cpu arm1176 \
-  -m 256 \
-  -drive "file=${HOME}/2022-04-04-raspios-bullseye-armhf.img,if=none,index=0,media=disk,format=raw,id=disk0" \
-  -device "virtio-blk-pci,drive=disk0,disable-modern=on,disable-legacy=off" \
-  -dtb ~/qemu-rpi-kernel/versatile-pb-bullseye-5.10.63.dtb \
-  -kernel ~/qemu-rpi-kernel/kernel-qemu-5.10.63-bullseye \
-  -append 'root=/dev/vda2 panic=1' \
+$ git clone https://github.com/wxleong/tpm2-qemu ~/tpm2-qemu
+$ cd ~/tpm2-qemu/cuse
+$ gcc -Wall -Wextra cuse.c `pkg-config --cflags --libs fuse` -o cuse
+```
+
+# Launch QEMU
+
+Plug in the USB-FTDI-SPI-TPM and start the tpm2-server:
+```
+$ cd ~/build/tpm2_server
+$ sudo ./ntpm -d -f 10000000
+```
+
+Start a `/dev/usbtpm0` character device in user space:
+```
+$ sudo ~/tpm2-qemu/cuse/cuse -f --name=usbtpm0
+$ sudo chmod a+rw /dev/usbtpm0
+```
+
+Start the QEMU:
+```
+$ touch /tmp/usbtpm0-cancel
+$ qemu-system-x86_64 \
+  -m 4096 \
+  -bios /usr/share/ovmf/OVMF.fd \
+  -kernel ~/Downloads/vmlinuz-5.10.0-15-amd64 \
+  -append "root=/dev/vda1 console=ttyS0" \
+  -initrd ~/Downloads/initrd.img-5.10.0-15-amd64 \
+  -drive if=virtio,file=debian-x86_64.qcow,format=qcow2,id=hd \
+  -smp $(nproc) \
   -net "user,hostfwd=tcp::5555-:22" \
   -net nic \
-  -no-reboot \
-  -nographic
-```
-<!--
-OR:
-$ qemu-system-arm \
-  -M versatilepb \
-  -cpu arm1176 \
-  -m 256 \
-  -hda ~/2022-04-04-raspios-bullseye-armhf.img \
-  -dtb ~/qemu-rpi-kernel/versatile-pb-bullseye-5.10.63.dtb \
-  -kernel ~/qemu-rpi-kernel/kernel-qemu-5.10.63-bullseye \
-  -append "root=/dev/sda2 rootfstype=ext4 rw" \
-  -net "user,hostfwd=tcp::5022-:22" \
-  -net nic \
-  -no-reboot \
-  -nographic
-  //-serial stdio \ <-- Ctrl+C will terminate the QEMU
--->
-
-<!--
-Via hypervisor agnostic libvirt:
-```
-$ virt-install \
-  --name pi \
-  --arch armv6l \
-  --machine versatilepb \
-  --cpu arm1176 \
-  --vcpus 1 \
-  --memory 256 \
-  --import \
-  --disk ~/2019-09-26-raspbian-buster-lite.img,format=raw,bus=virtio \
-  --network user,model=virtio \
-  --video vga \
-  --graphics spice \
-  --rng device=/dev/urandom,model=virtio \
-  --boot 'dtb=${HOME}/qemu-rpi-kernel/versatile-pb-bullseye-5.10.63.dtb, \
-          kernel=${HOME}/qemu-rpi-kernel/kernel-qemu-5.10.63-bullseye, \
-          kernel_args=root=/dev/vda2 panic=1' \
-  --events on_reboot=destroy
-```
--->
-
-Enable SSH server on RPi OS:
-```
-$ sudo raspi-config
-    > 3 Interface Options
-      > I2 SSH
-        > <Yes>
+  -nographic \
+  -monitor none \
+  -serial stdio \
+  -tpmdev passthrough,id=usbtpm0,path=/dev/usbtpm0,cancel-path=/tmp/usbtpm0-cancel \
+  -device tpm-tis,tpmdev=usbtpm0
 ```
 
 SSH to RPi OS from host:
 ```
 $ ssh -p 5555 pi@localhost
 ```
-<!--
-$ ssh -vvv -p 5555 pi@localhost <-- to set verbose
--->
 
 # References
 
-<a id="1">[1] https://github.com/wxleong/tpm2-rpi4/</a> <br>
-<a id="2">[2] https://www.infineon.com/cms/en/product/evaluation-boards/iridium9670-tpm2.0-linux/</a> <br>
-<a id="3">[3] https://github.com/qemu/qemu.git</a> <br>
-<a id="4">[4] https://github.com/dhruvvyas90/qemu-rpi-kernel/</a> <br>
+<a id="1">[1] https://github.com/wxleong/tpm2-usb</a> <br>
+<a id="2">[2] https://github.com/qemu/qemu.git</a> <br>
 
 # License
 
