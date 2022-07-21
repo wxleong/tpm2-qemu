@@ -1,0 +1,132 @@
+From bbbe7ab6f184be1e078ef501b8c14e3fd9d4620c Mon Sep 17 00:00:00 2001
+From: Peter Huewe <peterhuewe@gmx.de>
+Date: Wed, 30 Dec 2020 20:54:51 +0100
+Subject: [PATCH] workaround waitstates
+
+---
+ src/tss2-tcti/tcti-spi.c | 61 ++++++++++++++++++++++------------------
+ 1 file changed, 34 insertions(+), 27 deletions(-)
+
+diff --git a/src/tss2-tcti/tcti-spi.c b/src/tss2-tcti/tcti-spi.c
+index df4eba73f..866878720 100644
+--- a/src/tss2-tcti/tcti-spi.c
++++ b/src/tss2-tcti/tcti-spi.c
+@@ -70,7 +70,7 @@ static inline uint32_t spi_tpm_read_be32(const void *src)
+     const uint8_t *s = src;
+     return (((uint32_t)s[0]) << 24) | (((uint32_t)s[1]) << 16) | (((uint32_t)s[2]) << 8) | (((uint32_t)s[3]) << 0);
+ }
+-
++#if 0
+ static TSS2_RC spi_tpm_start_transaction(TSS2_TCTI_SPI_CONTEXT* ctx, enum TCTI_SPI_REGISTER_ACCESS_TYPE access, size_t bytes, uint32_t addr)
+ {
+     TSS2_RC rc;
+@@ -126,7 +126,7 @@ static TSS2_RC spi_tpm_start_transaction(TSS2_TCTI_SPI_CONTEXT* ctx, enum TCTI_S
+     // The TPM did not exit the wait state in time
+     return TSS2_TCTI_RC_IO_ERROR;
+ }
+-
++#endif
+ static TSS2_RC spi_tpm_end_transaction(TSS2_TCTI_SPI_CONTEXT* ctx)
+ {
+     // Release CS (ends the transaction) and release the bus for other devices
+@@ -150,30 +150,33 @@ static TSS2_RC spi_tpm_read_reg(TSS2_TCTI_SPI_CONTEXT* ctx, uint32_t reg_number,
+     
+     // Check maximum register transfer size is 64 byte
+     assert(cnt <= 64);
++   uint8_t buf[64+4];
++   uint32_t addr = reg_number;
++    // Transaction type and transfer size
++    buf[0] = 0x80 | (cnt- 1);
++    
++    // TPM register address
++    buf[1] = addr >> 16 & 0xff;
++    buf[2] = addr >> 8  & 0xff;
++    buf[3] = addr >> 0  & 0xff;
++
+ 
+-    // Start read transaction
+-    rc = spi_tpm_start_transaction(ctx, access, cnt, reg_number);
++    rc = spi_tpm_spi_acquire(ctx);
+     if (rc != TSS2_RC_SUCCESS) {
+-        spi_tpm_log_register_access(access, reg_number, NULL, cnt, "failed in transaction start");
+-        spi_tpm_end_transaction(ctx);
+         return TSS2_TCTI_RC_IO_ERROR;
+     }
+     // Read register
+-    rc = spi_tpm_spi_transfer(ctx, NULL, buffer, cnt);
++    rc = spi_tpm_spi_transfer(ctx, buf, buf, cnt+4);
+     if (rc != TSS2_RC_SUCCESS) {
+         spi_tpm_log_register_access(access, reg_number, NULL, cnt, "failed in transfer");
+         spi_tpm_end_transaction(ctx);
+         return TSS2_TCTI_RC_IO_ERROR;
+     }
+-    // End transaction
+-    rc = spi_tpm_end_transaction(ctx);
+-    if (rc != TSS2_RC_SUCCESS) {
+-        spi_tpm_log_register_access(access, reg_number, NULL, cnt, "failed ending the transaction");
+-        return TSS2_TCTI_RC_IO_ERROR;
+-    }
+ 
++   memcpy(buffer,buf+4, cnt);
+     // Print debug information and return success
+     spi_tpm_log_register_access(access, reg_number, buffer, cnt, NULL);
++    spi_tpm_spi_release(ctx);
+     return TSS2_RC_SUCCESS;
+ }
+ 
+@@ -185,29 +188,33 @@ static TSS2_RC spi_tpm_write_reg(TSS2_TCTI_SPI_CONTEXT* ctx, uint32_t reg_number
+     // Check maximum register transfer size is 64 byte
+     assert(cnt <= 64);
+ 
+-    // Start write transaction
+-    rc = spi_tpm_start_transaction(ctx, access, cnt, reg_number);
++   uint8_t buf[64+4];
++   uint32_t addr = reg_number;
++    // Transaction type and transfer size
++    buf[0] = ((access == TCTI_SPI_REGISTER_READ) ? 0x80 : 0x00) | (cnt- 1);
++    
++    // TPM register address
++    buf[1] = addr >> 16 & 0xff;
++    buf[2] = addr >> 8  & 0xff;
++    buf[3] = addr >> 0  & 0xff;
++   memcpy(buf+4,buffer, cnt);
++
++    rc = spi_tpm_spi_acquire(ctx);
+     if (rc != TSS2_RC_SUCCESS) {
+-        spi_tpm_end_transaction(ctx);
+-        spi_tpm_log_register_access(access, reg_number, buffer, cnt, "failed in transaction start");
+         return TSS2_TCTI_RC_IO_ERROR;
+     }
++
+     // Write register
+-    rc = spi_tpm_spi_transfer(ctx, buffer, NULL, cnt);
++    rc = spi_tpm_spi_transfer(ctx, buf, NULL, cnt+4);
+     if (rc != TSS2_RC_SUCCESS) {
+         spi_tpm_end_transaction(ctx);
+-        spi_tpm_log_register_access(access, reg_number, buffer, cnt, "failed in transfer");
+-        return TSS2_TCTI_RC_IO_ERROR;
+-    }
+-    // End transaction
+-    rc = spi_tpm_end_transaction(ctx);
+-    if (rc != TSS2_RC_SUCCESS) {
+-        spi_tpm_log_register_access(access, reg_number, NULL, cnt, "failed ending the transaction");
++        spi_tpm_log_register_access(access, reg_number, buf, cnt+4, "failed in transfer");
+         return TSS2_TCTI_RC_IO_ERROR;
+     }
+ 
+     // Print debug information and return success
+-    spi_tpm_log_register_access(access, reg_number, buffer, cnt, NULL);
++    spi_tpm_log_register_access(access, reg_number, buf, cnt+4, NULL);
++    spi_tpm_spi_release(ctx);
+     return TSS2_RC_SUCCESS;
+ }
+ 
+@@ -282,7 +289,7 @@ static TSS2_RC spi_tpm_wait_for_status(TSS2_TCTI_SPI_CONTEXT* ctx, uint32_t stat
+             return TSS2_RC_SUCCESS;
+         }
+         // Delay next poll by 8ms to avoid spamming the TPM
+-        spi_tpm_delay_ms(ctx, 8);
++        spi_tpm_delay_ms(ctx, 50);
+     } while (blocking || !spi_tpm_timeout_expired(ctx));
+ 
+     // Timed out

@@ -1,0 +1,32 @@
+From 2b588a02b8fdafe378eefcaea5669539795e9c01 Mon Sep 17 00:00:00 2001
+From: "wenxin.leong" <wenxin.leong@infineon.com>
+Date: Thu, 21 Jul 2022 14:39:58 +0800
+Subject: [PATCH] fix tcti-spi-usb to stabilize the usb connection
+
+---
+ src/tss2-tcti/tcti-spi-usb.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/src/tss2-tcti/tcti-spi-usb.c b/src/tss2-tcti/tcti-spi-usb.c
+index b21f82ee..2630258e 100644
+--- a/src/tss2-tcti/tcti-spi-usb.c
++++ b/src/tss2-tcti/tcti-spi-usb.c
+@@ -195,7 +195,6 @@ TSS2_RC platform_spi_transfer (void* user_data, const void *data_out, void *data
+     }
+ 
+ 
+-posix_usleep(30*1000);
+ 
+     transfered = 0 ;
+    retry = 0 ; 
+@@ -353,7 +352,6 @@ TSS2_TCTI_SPI_PLATFORM create_tcti_spi_platform()
+     platform.spi_transfer = platform_spi_transfer;
+     platform.finalize = platform_finalize;
+ 
+-    printf("PLATFORM REG DONE\n--------------------\n");
+     
+     return platform;
+ out:
+-- 
+2.25.1
+
